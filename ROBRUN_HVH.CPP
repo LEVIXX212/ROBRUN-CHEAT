@@ -4,7 +4,7 @@
 #include <string>
 #include <MinHook.h>
 
-#pragma comment(lib, "MinHook.lib")
+#pragma comment(lib, "MinHook.x64.lib")
 
 struct Vector3 { float x, y, z; };
 struct PlayerData { void* ptr; Vector3 headPos; int health; std::string name; };
