@@ -1,4 +1,4 @@
-ame: Build C++ DLL
+name: Build C++ DLL
 
 on: [push, workflow_dispatch]
 
