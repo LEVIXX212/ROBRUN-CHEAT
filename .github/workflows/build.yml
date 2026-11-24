@@ -1,0 +1,33 @@
+name: Build C++ DLL
+
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Download and Build MinHook
+        run: |
+          git clone https://github.com/TsudaKageyu/minhook.git
+          cd minhook
+          mkdir build
+          cd build
+          cmake .. -A x64
+          cmake --build . --config Release
+
+      - name: Compile Cheat
+        run: |
+          cl /EHsc /O2 /LD robrun_hvh.cpp /I minhook/include /link /LIBPATH:minhook/build/src/Release minhook.lib user32.lib gdi32.lib /OUT:robrun_hvh.dll
+
+      - name: Upload DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: ROBRUN-Cheat-DLL
+          path: robrun_hvh.dll
