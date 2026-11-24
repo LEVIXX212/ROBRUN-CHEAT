@@ -19,7 +19,10 @@ void __stdcall Shellcode(MANUAL_MAPPING_DATA* pData) {
 
     auto _LoadLibraryA = reinterpret_cast<decltype(&LoadLibraryA)>(pData->pLoadLibraryA);
     auto _GetProcAddress = reinterpret_cast<decltype(&GetProcAddress)>(pData->pGetProcAddress);
-    auto _DllMain = reinterpret_cast<decltype(&DllMain)>(pOpt->AddressOfEntryPoint + (DWORD_PTR)pBase);
+    
+    // Исправление: явно задаем тип функции, так как в EXE нет DllMain по умолчанию
+    typedef BOOL(WINAPI* DllMain_t)(HMODULE, DWORD, LPVOID);
+    auto _DllMain = reinterpret_cast<DllMain_t>(pOpt->AddressOfEntryPoint + (DWORD_PTR)pBase);
 
     if (pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size) {
         auto* pRelocData = reinterpret_cast<IMAGE_BASE_RELOCATION*>(pBase + pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress);
@@ -76,9 +79,3 @@ DWORD GetProcessId(const char* name) {
                 if (!_stricmp(pe.szExeFile, name)) { pid = pe.th32ProcessID; break; }
             } while (Process32Next(snap, &pe));
         }
-        CloseHandle(snap);
-    }
-    return pid;
-}
-
-bool ManualMap(HANDLE hProc, const char* dllPath) {
