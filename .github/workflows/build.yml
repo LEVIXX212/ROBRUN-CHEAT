@@ -1,4 +1,4 @@
-name: Build C++ DLL
+name: Build C++ DLL and Injector
 
 on: [push, workflow_dispatch]
 
@@ -20,12 +20,18 @@ jobs:
           cmake -B build -A x64
           cmake --build build --config Release
 
-      - name: Compile Cheat
+      - name: Compile Cheat DLL
         run: |
           cl /EHsc /O2 /LD robrun_hvh.cpp /I minhook/include /link /LIBPATH:minhook/build/Release minhook.x64.lib user32.lib gdi32.lib /OUT:robrun_hvh.dll
 
-      - name: Upload DLL
+      - name: Compile Injector EXE
+        run: |
+          cl /EHsc /O2 manual_injector.cpp /link user32.lib /OUT:injector.exe
+
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ROBRUN-Cheat-DLL
-          path: robrun_hvh.dll
+          name: ROBRUN-Cheat-Files
+          path: |
+            robrun_hvh.dll
+            injector.exe
