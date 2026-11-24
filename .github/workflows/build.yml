@@ -1,4 +1,4 @@
-name: Build C++ DLL
+ame: Build C++ DLL
 
 on: [push, workflow_dispatch]
 
@@ -19,11 +19,10 @@ jobs:
           cd minhook
           cmake -B build -A x64
           cmake --build build --config Release
-          copy build\src\Release\minhook.lib ..\minhook.lib
 
       - name: Compile Cheat
         run: |
-          cl /EHsc /O2 /LD robrun_hvh.cpp /I minhook/include /link minhook.lib user32.lib gdi32.lib /OUT:robrun_hvh.dll
+          cl /EHsc /O2 /LD robrun_hvh.cpp /I minhook/include /link /LIBPATH:minhook/build/Release minhook.x64.lib user32.lib gdi32.lib /OUT:robrun_hvh.dll
 
       - name: Upload DLL
         uses: actions/upload-artifact@v4
