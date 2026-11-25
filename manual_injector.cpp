@@ -20,7 +20,6 @@ void __stdcall Shellcode(MANUAL_MAPPING_DATA* pData) {
     auto _LoadLibraryA = reinterpret_cast<decltype(&LoadLibraryA)>(pData->pLoadLibraryA);
     auto _GetProcAddress = reinterpret_cast<decltype(&GetProcAddress)>(pData->pGetProcAddress);
     
-    // Исправление: явно задаем тип функции, так как в EXE нет DllMain по умолчанию
     typedef BOOL(WINAPI* DllMain_t)(HMODULE, DWORD, LPVOID);
     auto _DllMain = reinterpret_cast<DllMain_t>(pOpt->AddressOfEntryPoint + (DWORD_PTR)pBase);
 
@@ -79,3 +78,7 @@ DWORD GetProcessId(const char* name) {
                 if (!_stricmp(pe.szExeFile, name)) { pid = pe.th32ProcessID; break; }
             } while (Process32Next(snap, &pe));
         }
+        CloseHandle(snap);
+    }
+    return pid;
+}
