@@ -1,107 +1,11 @@
-#include <windows.h>
-#include <tlhelp32.h>
-#include <iostream>
-#include <fstream>
-
-struct MANUAL_MAPPING_DATA { BYTE* pLoadLibraryA; BYTE* pGetProcAddress; BYTE* pImageBase; };
-
-#pragma warning(disable: 4244)
-void __stdcall Shellcode(MANUAL_MAPPING_DATA* pData) {
-    if (!pData) return;
-    BYTE* pBase = pData->pImageBase;
-    auto* pOpt = &reinterpret_cast<IMAGE_NT_HEADERS*>(pBase + reinterpret_cast<IMAGE_DOS_HEADER*>(pBase)->e_lfanew)->OptionalHeader;
-    auto _LoadLibraryA = reinterpret_cast<decltype(&LoadLibraryA)>(pData->pLoadLibraryA);
-    auto _GetProcAddress = reinterpret_cast<decltype(&GetProcAddress)>(pData->pGetProcAddress);
-    typedef BOOL(WINAPI* DllMain_t)(HMODULE, DWORD, LPVOID);
-    auto _DllMain = reinterpret_cast<DllMain_t>(pOpt->AddressOfEntryPoint + (DWORD_PTR)pBase);
-    if (pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size) {
-        auto* pRelocData = reinterpret_cast<IMAGE_BASE_RELOCATION*>(pBase + pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress);
-        while (pRelocData->VirtualAddress) {
-            UINT AmountOfEntries = (pRelocData->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
-            WORD* pRelativeInfo = reinterpret_cast<WORD*>(pRelocData + 1);
-            for (UINT i = 0; i < AmountOfEntries; ++i, ++pRelativeInfo) {
-                if ((*pRelativeInfo >> 12) == IMAGE_REL_BASED_DIR64) {
-                    DWORD_PTR* pPatch = reinterpret_cast<DWORD_PTR*>(pBase + pRelocData->VirtualAddress + (*pRelativeInfo & 0xFFF));
-                    *pPatch += reinterpret_cast<DWORD_PTR>(pBase) - pOpt->ImageBase;
-                }
-            }
-            pRelocData = reinterpret_cast<IMAGE_BASE_RELOCATION*>(reinterpret_cast<BYTE*>(pRelocData) + pRelocData->SizeOfBlock);
-        }
-    }
-    if (pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size) {
-        auto* pImportDescr = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(pBase + pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
-        while (pImportDescr->Name) {
-            char* szMod = reinterpret_cast<char*>(pBase + pImportDescr->Name);
-            HMODULE hDll = _LoadLibraryA(szMod);
-            ULONG_PTR* pThunkRef = reinterpret_cast<ULONG_PTR*>(pBase + pImportDescr->OriginalFirstThunk);
-            ULONG_PTR* pFuncRef = reinterpret_cast<ULONG_PTR*>(pBase + pImportDescr->FirstThunk);
-            if (!pThunkRef) pThunkRef = pFuncRef;
-            for (; *pThunkRef; ++pThunkRef, ++pFuncRef) {
-                if (IMAGE_SNAP_BY_ORDINAL(*pThunkRef)) *pFuncRef = (ULONG_PTR)_GetProcAddress(hDll, reinterpret_cast<char*>(*pThunkRef & 0xFFFF));
-                else { auto* pImport = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(pBase + (*pThunkRef)); *pFuncRef = (ULONG_PTR)_GetProcAddress(hDll, pImport->Name); }
-            }
-            ++pImportDescr;
-        }
-    }
-    if (pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].Size) {
-        auto* pTLS = reinterpret_cast<IMAGE_TLS_DIRECTORY*>(pBase + pOpt->DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].VirtualAddress);
-        auto* pCallback = reinterpret_cast<PIMAGE_TLS_CALLBACK*>(pTLS->AddressOfCallBacks);
-        for (; pCallback && *pCallback; ++pCallback) (*pCallback)(pBase, DLL_PROCESS_ATTACH, nullptr);
-    }
-    _DllMain(reinterpret_cast<HMODULE>(pBase), DLL_PROCESS_ATTACH, nullptr);
-}
-#pragma warning(default: 4244)DWORD GetProcessId(const char* name) {
-    DWORD pid = 0; HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap != INVALID_HANDLE_VALUE) {
-        PROCESSENTRY32 pe; pe.dwSize = sizeof(pe);
-        if (Process32First(snap, &pe)) { do { if (!_stricmp(pe.szExeFile, name)) { pid = pe.th32ProcessID; break; } } while (Process32Next(snap, &pe)); }
-        CloseHandle(snap);
-    }
-    return pid;
-}
-
-bool ManualMap(HANDLE hProc, const char* dllPath) {
-    std::ifstream File(dllPath, std::ios::binary | std::ios::ate);
-    if (File.fail()) return false;
-    auto FileSize = File.tellg(); if (FileSize < 0x1000) return false;
-    BYTE* pSrcData = new BYTE[(UINT_PTR)FileSize];
-    File.seekg(0, std::ios::beg); File.read((char*)pSrcData, FileSize); File.close();
-    auto* pDosHdr = reinterpret_cast<IMAGE_DOS_HEADER*>(pSrcData);
-    auto* pNtHdr = reinterpret_cast<IMAGE_NT_HEADERS*>(pSrcData + pDosHdr->e_lfanew);
-    void* pTargetBase = VirtualAllocEx(hProc, nullptr, pNtHdr->OptionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!pTargetBase) { delete[] pSrcData; return false; }
-    MANUAL_MAPPING_DATA data{ 0 };
-    data.pLoadLibraryA = (BYTE*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryA");
-    data.pGetProcAddress = (BYTE*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetProcAddress");
-    data.pImageBase = (BYTE*)pTargetBase;
-    void* pData = VirtualAllocEx(hProc, nullptr, sizeof(MANUAL_MAPPING_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    WriteProcessMemory(hProc, pData, &data, sizeof(MANUAL_MAPPING_DATA), nullptr);
-    WriteProcessMemory(hProc, pTargetBase, pSrcData, 0x1000, nullptr);
-    auto* pSectionHeader = IMAGE_FIRST_SECTION(pNtHdr);
-    for (UINT i = 0; i != pNtHdr->FileHeader.NumberOfSections; ++i, ++pSectionHeader) {
-        if (pSectionHeader->SizeOfRawData) WriteProcessMemory(hProc, (void*)((DWORD_PTR)pTargetBase + pSectionHeader->VirtualAddress), (void*)((DWORD_PTR)pSrcData + pSectionHeader->PointerToRawData), pSectionHeader->SizeOfRawData, nullptr);
-    }
-    void* pShellcode = VirtualAllocEx(hProc, nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    WriteProcessMemory(hProc, pShellcode, Shellcode, 0x1000, nullptr);
-    HANDLE hThread = CreateRemoteThread(hProc, nullptr, 0, (LPTHREAD_START_ROUTINE)pShellcode, pData, 0, nullptr);
-    if (!hThread) { VirtualFreeEx(hProc, pTargetBase, 0, MEM_RELEASE); VirtualFreeEx(hProc, pData, 0, MEM_RELEASE); VirtualFreeEx(hProc, pShellcode, 0, MEM_RELEASE); delete[] pSrcData; return false; }
-    WaitForSingleObject(hThread, 5000); CloseHandle(hThread);
-    VirtualFreeEx(hProc, pShellcode, 0, MEM_RELEASE); VirtualFreeEx(hProc, pData, 0, MEM_RELEASE);
-    DWORD oldProtect; VirtualProtectEx(hProc, pTargetBase, 0x1000, PAGE_READWRITE, &oldProtect);
-    BYTE nullBytes[0x1000] = { 0 }; WriteProcessMemory(hProc, pTargetBase, nullBytes, 0x1000, nullptr);
-    VirtualProtectEx(hProc, pTargetBase, 0x1000, oldProtect, &oldProtect);
-    delete[] pSrcData; return true;
-}
-
-int main() {
-    std::cout << "--- Manual Map Injector ---\n";
-    const char* targetProcess = "ROBRUN.exe"; const char* dllPath = "robrun_hvh.dll";
-    DWORD pid = GetProcessId(targetProcess);
-    if (!pid) { std::cout << "[-] Process not found. Launch the game first.\n"; system("pause"); return 1; }
-    std::cout << "[+] Found PID: " << pid << "\n";
-    HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    if (!hProc) { std::cout << "[-] OpenProcess failed. Run as Admin or EAC blocks it.\n"; system("pause"); return 1; }
-    std::cout << "[*] Injecting via Manual Map...\n";
-    if (ManualMap(hProc, dllPath)) std::cout << "[+] SUCCESS! DLL Mapped.\n"; else std::cout << "[-] FAILED.\n";
-    CloseHandle(hProc); system("pause"); return 0;
-}
+#include<windows.h>
+#include<tlhelp32.h>
+#include<fstream>
+#include<cstdio>
+struct M{BYTE*a;BYTE*b;BYTE*c;};
+#pragma warning(disable:4244)
+void __stdcall S(M*p){if(!p)return;BYTE*B=p->c;auto*O=&((IMAGE_NT_HEADERS*)(B+((IMAGE_DOS_HEADER*)B)->e_lfanew))->OptionalHeader;auto L=(decltype(&LoadLibraryA))p->a;auto G=(decltype(&GetProcAddress))p->b;typedef BOOL(WINAPI*D)(HMODULE,DWORD,LPVOID);auto Dm=(D)(O->AddressOfEntryPoint+(DWORD_PTR)B);if(O->DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size){auto*r=(IMAGE_BASE_RELOCATION*)(B+O->DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress);while(r->VirtualAddress){UINT n=(r->SizeOfBlock-sizeof(IMAGE_BASE_RELOCATION))/2;WORD*e=(WORD*)(r+1);for(UINT i=0;i<n;++i,++e)if((*e>>12)==IMAGE_REL_BASED_DIR64){DWORD_PTR*v=(DWORD_PTR*)(B+r->VirtualAddress+(*e&0xFFF));*v+=(DWORD_PTR)B-O->ImageBase;}r=(IMAGE_BASE_RELOCATION*)((BYTE*)r+r->SizeOfBlock);}}if(O->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size){auto*d=(IMAGE_IMPORT_DESCRIPTOR*)(B+O->DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);while(d->Name){HMODULE h=L((char*)(B+d->Name));auto*t=(ULONG_PTR*)(B+d->OriginalFirstThunk);auto*f=(ULONG_PTR*)(B+d->FirstThunk);if(!t)t=f;for(;*t;++t,++f){if(IMAGE_SNAP_BY_ORDINAL(*t))*f=(ULONG_PTR)G(h,(char*)(*t&0xFFFF));else{auto*n=(IMAGE_IMPORT_BY_NAME*)(B+*t);*f=(ULONG_PTR)G(h,n->Name);}}++d;}}if(O->DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].Size){auto*tl=(IMAGE_TLS_DIRECTORY*)(B+O->DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].VirtualAddress);auto*cb=(PIMAGE_TLS_CALLBACK*)tl->AddressOfCallBacks;for(;cb&&*cb;++cb)(*cb)(B,DLL_PROCESS_ATTACH,0);}Dm((HMODULE)B,DLL_PROCESS_ATTACH,0);}
+#pragma warning(default:4244)
+DWORD P(const char*n){DWORD p=0;HANDLE s=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);if(s!=INVALID_HANDLE_VALUE){PROCESSENTRY32 e;e.dwSize=sizeof(e);if(Process32First(s,&e)){do{if(!_stricmp(e.szExeFile,n)){p=e.th32ProcessID;break;}}while(Process32Next(s,&e));}CloseHandle(s);}return p;}
+bool Mx(HANDLE h,const char*p){std::ifstream f(p,std::ios::binary|std::ios::ate);if(f.fail())return false;auto sz=f.tellg();if(sz<0x1000)return false;BYTE*b=new BYTE[(UINT_PTR)sz];f.seekg(0);f.read((char*)b,sz);f.close();auto*dh=(IMAGE_DOS_HEADER*)b;auto*nh=(IMAGE_NT_HEADERS*)(b+dh->e_lfanew);void*tb=VirtualAllocEx(h,0,nh->OptionalHeader.SizeOfImage,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);if(!tb){delete[]b;return false;}M d;d.a=(BYTE*)GetProcAddress(GetModuleHandleA("kernel32.dll"),"LoadLibraryA");d.b=(BYTE*)GetProcAddress(GetModuleHandleA("kernel32.dll"),"GetProcAddress");d.c=(BYTE*)tb;void*pd=VirtualAllocEx(h,0,sizeof(M),MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);WriteProcessMemory(h,pd,&d,sizeof(M),0);WriteProcessMemory(h,tb,b,0x1000,0);auto*sh=IMAGE_FIRST_SECTION(nh);for(UINT i=0;i<nh->FileHeader.NumberOfSections;++i,++sh)if(sh->SizeOfRawData)WriteProcessMemory(h,(void*)((DWORD_PTR)tb+sh->VirtualAddress),(void*)((DWORD_PTR)b+sh->PointerToRawData),sh->SizeOfRawData,0);void*sc=VirtualAllocEx(h,0,0x1000,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);WriteProcessMemory(h,sc,S,0x1000,0);HANDLE th=CreateRemoteThread(h,0,0,(LPTHREAD_START_ROUTINE)sc,pd,0,0);if(!th){VirtualFreeEx(h,tb,0,MEM_RELEASE);VirtualFreeEx(h,pd,0,MEM_RELEASE);VirtualFreeEx(h,sc,0,MEM_RELEASE);delete[]b;return false;}WaitForSingleObject(th,5000);CloseHandle(th);VirtualFreeEx(h,sc,0,MEM_RELEASE);VirtualFreeEx(h,pd,0,MEM_RELEASE);DWORD op;VirtualProtectEx(h,tb,0x1000,PAGE_READWRITE,&op);BYTE z[0x1000]={0};WriteProcessMemory(h,tb,z,0x1000,0);VirtualProtectEx(h,tb,0x1000,op,&op);delete[]b;return true;}
+int main(){printf("---Injector---\n");auto pid=P("ROBRUN.exe");if(!pid){printf("No process\n");system("pause");return 1;}printf("PID:%d\n",pid);HANDLE h=OpenProcess(PROCESS_ALL_ACCESS,FALSE,pid);if(!h){printf("Open fail\n");system("pause");return 1;}printf("Injecting...\n");if(Mx(h,"robrun_hvh.dll"))printf("SUCCESS\n");else printf("FAILED\n");CloseHandle(h);system("pause");return 0;}
