@@ -1,15 +1,9 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <iostream>
-#include <vector>
-#include <string>
 #include <fstream>
 
-struct MANUAL_MAPPING_DATA {
-    BYTE* pLoadLibraryA;
-    BYTE* pGetProcAddress;
-    BYTE* pImageBase;
-};
+struct MANUAL_MAPPING_DATA { BYTE* pLoadLibraryA; BYTE* pGetProcAddress; BYTE* pImageBase; };
 
 #pragma warning(disable: 4244)
 void __stdcall Shellcode(MANUAL_MAPPING_DATA* pData) {
@@ -56,16 +50,11 @@ void __stdcall Shellcode(MANUAL_MAPPING_DATA* pData) {
     }
     _DllMain(reinterpret_cast<HMODULE>(pBase), DLL_PROCESS_ATTACH, nullptr);
 }
-#pragma warning(default: 4244)
-
-DWORD GetProcessId(const char* name) {
-    DWORD pid = 0;
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+#pragma warning(default: 4244)DWORD GetProcessId(const char* name) {
+    DWORD pid = 0; HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap != INVALID_HANDLE_VALUE) {
         PROCESSENTRY32 pe; pe.dwSize = sizeof(pe);
-        if (Process32First(snap, &pe)) {
-            do { if (!_stricmp(pe.szExeFile, name)) { pid = pe.th32ProcessID; break; } } while (Process32Next(snap, &pe));
-        }
+        if (Process32First(snap, &pe)) { do { if (!_stricmp(pe.szExeFile, name)) { pid = pe.th32ProcessID; break; } } while (Process32Next(snap, &pe)); }
         CloseHandle(snap);
     }
     return pid;
@@ -74,3 +63,45 @@ DWORD GetProcessId(const char* name) {
 bool ManualMap(HANDLE hProc, const char* dllPath) {
     std::ifstream File(dllPath, std::ios::binary | std::ios::ate);
     if (File.fail()) return false;
+    auto FileSize = File.tellg(); if (FileSize < 0x1000) return false;
+    BYTE* pSrcData = new BYTE[(UINT_PTR)FileSize];
+    File.seekg(0, std::ios::beg); File.read((char*)pSrcData, FileSize); File.close();
+    auto* pDosHdr = reinterpret_cast<IMAGE_DOS_HEADER*>(pSrcData);
+    auto* pNtHdr = reinterpret_cast<IMAGE_NT_HEADERS*>(pSrcData + pDosHdr->e_lfanew);
+    void* pTargetBase = VirtualAllocEx(hProc, nullptr, pNtHdr->OptionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!pTargetBase) { delete[] pSrcData; return false; }
+    MANUAL_MAPPING_DATA data{ 0 };
+    data.pLoadLibraryA = (BYTE*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "LoadLibraryA");
+    data.pGetProcAddress = (BYTE*)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetProcAddress");
+    data.pImageBase = (BYTE*)pTargetBase;
+    void* pData = VirtualAllocEx(hProc, nullptr, sizeof(MANUAL_MAPPING_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    WriteProcessMemory(hProc, pData, &data, sizeof(MANUAL_MAPPING_DATA), nullptr);
+    WriteProcessMemory(hProc, pTargetBase, pSrcData, 0x1000, nullptr);
+    auto* pSectionHeader = IMAGE_FIRST_SECTION(pNtHdr);
+    for (UINT i = 0; i != pNtHdr->FileHeader.NumberOfSections; ++i, ++pSectionHeader) {
+        if (pSectionHeader->SizeOfRawData) WriteProcessMemory(hProc, (void*)((DWORD_PTR)pTargetBase + pSectionHeader->VirtualAddress), (void*)((DWORD_PTR)pSrcData + pSectionHeader->PointerToRawData), pSectionHeader->SizeOfRawData, nullptr);
+    }
+    void* pShellcode = VirtualAllocEx(hProc, nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    WriteProcessMemory(hProc, pShellcode, Shellcode, 0x1000, nullptr);
+    HANDLE hThread = CreateRemoteThread(hProc, nullptr, 0, (LPTHREAD_START_ROUTINE)pShellcode, pData, 0, nullptr);
+    if (!hThread) { VirtualFreeEx(hProc, pTargetBase, 0, MEM_RELEASE); VirtualFreeEx(hProc, pData, 0, MEM_RELEASE); VirtualFreeEx(hProc, pShellcode, 0, MEM_RELEASE); delete[] pSrcData; return false; }
+    WaitForSingleObject(hThread, 5000); CloseHandle(hThread);
+    VirtualFreeEx(hProc, pShellcode, 0, MEM_RELEASE); VirtualFreeEx(hProc, pData, 0, MEM_RELEASE);
+    DWORD oldProtect; VirtualProtectEx(hProc, pTargetBase, 0x1000, PAGE_READWRITE, &oldProtect);
+    BYTE nullBytes[0x1000] = { 0 }; WriteProcessMemory(hProc, pTargetBase, nullBytes, 0x1000, nullptr);
+    VirtualProtectEx(hProc, pTargetBase, 0x1000, oldProtect, &oldProtect);
+    delete[] pSrcData; return true;
+}
+
+int main() {
+    std::cout << "--- Manual Map Injector ---\n";
+    const char* targetProcess = "ROBRUN.exe"; const char* dllPath = "robrun_hvh.dll";
+    DWORD pid = GetProcessId(targetProcess);
+    if (!pid) { std::cout << "[-] Process not found. Launch the game first.\n"; system("pause"); return 1; }
+    std::cout << "[+] Found PID: " << pid << "\n";
+    HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    if (!hProc) { std::cout << "[-] OpenProcess failed. Run as Admin or EAC blocks it.\n"; system("pause"); return 1; }
+    std::cout << "[*] Injecting via Manual Map...\n";
+    if (ManualMap(hProc, dllPath)) std::cout << "[+] SUCCESS! DLL Mapped.\n"; else std::cout << "[-] FAILED.\n";
+    CloseHandle(hProc); system("pause"); return 0;
+}
